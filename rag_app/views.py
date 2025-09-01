@@ -15,23 +15,27 @@ class OfflineRAGView(APIView):
         self.schema_info = {
             'hotwash_rowcell_data': {
                 'columns': ['id', 'sheet_id', 'column_id', 'row_id', 'column_index', 'column_type', 'cell_data', 'cell_date', 'created_at', 'updated_at'],
-                'description': 'Contains cell data with dates and user activities'
+                'description': 'Main cell data with tasks and dates'
             },
-            'rag_app_cellassignee': {
-                'columns': ['id', 'cell_id', 'sub_cell_id', 'cell_type'],
-                'description': 'Links cells to users (assignees)'
+            'hotwash_groups_header': {
+                'columns': ['id', 'name', 'column_type', 'column_index', 'sheet_id', 'group_id'],
+                'description': 'Column headers and types for sheets'
             },
-            'rag_app_cellassignee_user': {
-                'columns': ['id', 'cellassignee_id', 'user_id'],
-                'description': 'Many-to-many relationship between cell assignees and users'
+            'hotwash_sheet': {
+                'columns': ['id', 'name', 'privacy_type', 'user_id', 'workspace_id'],
+                'description': 'Sheet information'
             },
-            'rag_app_cellstatus': {
-                'columns': ['id', 'cell_id', 'sub_cell_id', 'status_id', 'cell_type'],
-                'description': 'Contains status information for cells'
+            'hotwash_workspace': {
+                'columns': ['id', 'workspace_name', 'description', 'user_id'],
+                'description': 'Workspace information'
             },
-            'auth_user': {
-                'columns': ['id', 'username', 'first_name', 'last_name', 'email'],
-                'description': 'User information table'
+            'authentication_user': {
+                'columns': ['id', 'name', 'username', 'email', 'studid'],
+                'description': 'User information'
+            },
+            'hotwash_status_dropdown': {
+                'columns': ['id', 'sheet_id', 'column_id', 'status_text', 'status_color', 'status_type'],
+                'description': 'Status options for cells'
             }
         }
     
@@ -59,40 +63,38 @@ class OfflineRAGView(APIView):
             # Default to past 7 days for context
             date_condition = f"DATE(gcd.cell_date) >= DATE('now', '-7 days')"
         
-        # Enhanced query combining related tables
+        # Base query to get name, task, date, status
         base_query = """
         SELECT 
             gcd.id,
-            gcd.sheet_id,
-            gcd.column_id,
-            gcd.row_id,
-            gcd.column_index,
+            gcd.cell_data as task,
+            gcd.cell_date as date,
             gcd.column_type,
-            gcd.cell_data,
-            gcd.cell_date,
-            gcd.created_at,
-            gcd.updated_at,
+            gcd.column_index,
+            gh.name as column_name,
+            gh.column_type as header_type,
             hs.name as sheet_name,
-            hs.privacy_type as sheet_privacy,
             hw.workspace_name,
-            hw.description as workspace_description,
             au.name as user_name,
             au.username,
-            au.email as user_email
+            sd.status_text as status,
+            sd.status_color
         FROM hotwash_rowcell_data gcd
+        LEFT JOIN hotwash_groups_header gh ON gcd.column_id = gh.id
         LEFT JOIN hotwash_sheet hs ON gcd.sheet_id = hs.id
         LEFT JOIN hotwash_workspace hw ON hs.workspace_id = hw.id
         LEFT JOIN authentication_user au ON hw.user_id = au.id
+        LEFT JOIN hotwash_status_dropdown sd ON (gcd.sheet_id = sd.sheet_id AND gcd.column_id = sd.column_id)
         WHERE 1=1
         """
         
         conditions = []
         
-        # Add user filtering based on workspace owner or username
+        # Add user filtering - search in cell data content for user references
         if user_id_match:
-            conditions.append(f"au.id = {user_id_match.group(1)}")
+            conditions.append(f"(au.id = {user_id_match.group(1)} OR gcd.cell_data LIKE '%user {user_id_match.group(1)}%')")
         elif username_match:
-            conditions.append(f"au.username LIKE '%{username_match.group(1)}%'")
+            conditions.append(f"(au.username LIKE '%{username_match.group(1)}%' OR gcd.cell_data LIKE '%{username_match.group(1)}%')")
         
         # Add date condition
         if date_condition:
@@ -133,7 +135,7 @@ class OfflineRAGView(APIView):
             return {"error": str(e)}
     
     def generate_response(self, query, data):
-        """Generate human-readable response based on query and data"""
+        """Generate human-readable response focused on name, task, date, status"""
         if isinstance(data, dict) and "error" in data:
             return f"Error executing query: {data['error']}"
         
@@ -141,56 +143,51 @@ class OfflineRAGView(APIView):
             return "No data found for the specified query."
         
         query_lower = query.lower()
-        
-        # Generate response with enhanced data from joined tables
         response_parts = []
         
         if 'status' in query_lower or 'what' in query_lower:
-            response_parts.append("Here's what I found:")
+            response_parts.append("Tasks and Activities:")
             
             for i, row in enumerate(data[:10]):  # Limit to 10 records
-                date = row.get('cell_date', 'Unknown date')
-                cell_data = row.get('cell_data', 'No data')
-                column_type = row.get('column_type', 'Unknown type')
-                sheet_name = row.get('sheet_name', 'Unknown sheet')
-                workspace_name = row.get('workspace_name', 'Unknown workspace')
-                user_name = row.get('user_name', 'Unknown user')
+                task = row.get('task', 'No task')
+                date = row.get('date', 'No date')
+                status = row.get('status', 'No status')
+                user_name = row.get('user_name', row.get('username', 'Unknown user'))
+                column_name = row.get('column_name', 'Unknown column')
                 
-                response_parts.append(f"\nRecord {i+1}:")
-                response_parts.append(f"  - Date: {date}")
-                response_parts.append(f"  - Data: {cell_data}")
-                response_parts.append(f"  - Column Type: {column_type}")
-                response_parts.append(f"  - Sheet: {sheet_name}")
-                response_parts.append(f"  - Workspace: {workspace_name}")
-                response_parts.append(f"  - User: {user_name}")
-                response_parts.append("")
+                response_parts.append(f"\n{i+1}. {user_name}")
+                response_parts.append(f"   Task: {task}")
+                response_parts.append(f"   Date: {date}")
+                response_parts.append(f"   Status: {status}")
+                response_parts.append(f"   Column: {column_name}")
         
         else:
-            response_parts.append(f"Found {len(data)} records matching your query.")
+            response_parts.append(f"Found {len(data)} task records.")
             
             if data:
-                dates = [row.get('cell_date', '') for row in data if row.get('cell_date')]
+                # Show date range
+                dates = [row.get('date', '') for row in data if row.get('date')]
                 if dates:
                     latest_date = max(dates)
                     oldest_date = min(dates)
                     response_parts.append(f"Date range: {oldest_date} to {latest_date}")
                 
-                # Show unique workspaces and sheets
+                # Show unique users and workspaces
+                users = set(row.get('user_name', row.get('username', 'Unknown')) for row in data if row.get('user_name') or row.get('username'))
                 workspaces = set(row.get('workspace_name', 'Unknown') for row in data if row.get('workspace_name'))
-                sheets = set(row.get('sheet_name', 'Unknown') for row in data if row.get('sheet_name'))
                 
+                if users:
+                    response_parts.append(f"Users: {', '.join(users)}")
                 if workspaces:
                     response_parts.append(f"Workspaces: {', '.join(workspaces)}")
-                if sheets:
-                    response_parts.append(f"Sheets: {', '.join(sheets)}")
                 
-                # Show sample data
-                response_parts.append("\nSample records:")
+                # Show sample tasks
+                response_parts.append("\nSample tasks:")
                 for i, row in enumerate(data[:3]):
-                    cell_data = row.get('cell_data', 'No data')
-                    date = row.get('cell_date', 'No date')
-                    sheet = row.get('sheet_name', 'Unknown sheet')
-                    response_parts.append(f"  {i+1}. {date} [{sheet}]: {cell_data}")
+                    task = row.get('task', 'No task')
+                    date = row.get('date', 'No date')
+                    status = row.get('status', 'No status')
+                    response_parts.append(f"  {i+1}. {date}: {task} [{status}]")
         
         return "\n".join(response_parts)
     
@@ -242,23 +239,27 @@ class SchemaInfoView(APIView):
         schema_info = {
             'hotwash_rowcell_data': {
                 'columns': ['id', 'sheet_id', 'column_id', 'row_id', 'column_index', 'column_type', 'cell_data', 'cell_date', 'created_at', 'updated_at'],
-                'description': 'Contains cell data with dates and user activities'
+                'description': 'Main cell data with tasks and dates'
             },
-            'rag_app_cellassignee': {
-                'columns': ['id', 'cell_id', 'sub_cell_id', 'cell_type'],
-                'description': 'Links cells to users (assignees)'
+            'hotwash_groups_header': {
+                'columns': ['id', 'name', 'column_type', 'column_index', 'sheet_id', 'group_id'],
+                'description': 'Column headers and types for sheets'
             },
-            'rag_app_cellassignee_user': {
-                'columns': ['id', 'cellassignee_id', 'user_id'],
-                'description': 'Many-to-many relationship between cell assignees and users'
+            'hotwash_sheet': {
+                'columns': ['id', 'name', 'privacy_type', 'user_id', 'workspace_id'],
+                'description': 'Sheet information'
             },
-            'rag_app_cellstatus': {
-                'columns': ['id', 'cell_id', 'sub_cell_id', 'status_id', 'cell_type'],
-                'description': 'Contains status information for cells'
+            'hotwash_workspace': {
+                'columns': ['id', 'workspace_name', 'description', 'user_id'],
+                'description': 'Workspace information'
             },
-            'auth_user': {
-                'columns': ['id', 'username', 'first_name', 'last_name', 'email'],
-                'description': 'User information table'
+            'authentication_user': {
+                'columns': ['id', 'name', 'username', 'email', 'studid'],
+                'description': 'User information'
+            },
+            'hotwash_status_dropdown': {
+                'columns': ['id', 'sheet_id', 'column_id', 'status_text', 'status_color', 'status_type'],
+                'description': 'Status options for cells'
             }
         }
         
